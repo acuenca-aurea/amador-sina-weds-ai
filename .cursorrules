@@ -1,0 +1,387 @@
+# Next.js Project Rules
+
+## Project Context
+- **Framework**: Next.js (App Router)
+- **Language**: TypeScript (strict mode required)
+- **Styling**: Tailwind CSS
+- **Hosting**: Vercel with GitHub CI/CD (main branch deploys to production)
+
+---
+
+## SECURITY RULES (MANDATORY)
+
+### Environment Variables
+- NEVER hardcode API keys, secrets, or sensitive data in code
+- ALWAYS use environment variables via `process.env.VARIABLE_NAME`
+- NEVER commit `.env` files to git - ensure `.env*` is in `.gitignore`
+- For Vercel deployments, set secrets in the Vercel dashboard, not in code
+- Use `NEXT_PUBLIC_` prefix ONLY for variables that are safe to expose to the browser
+- API keys (like `OPENAI_API_KEY`) must NEVER have `NEXT_PUBLIC_` prefix
+
+### Input Validation
+- ALWAYS validate ALL user inputs on the server-side, even if validated client-side
+- Use a validation library (Zod recommended) for type-safe input validation
+- Sanitize strings to prevent XSS attacks before rendering user content
+- Validate request body structure in API routes before processing
+- Set reasonable limits on input lengths to prevent abuse
+- Example pattern for API routes:
+```typescript
+import { z } from 'zod';
+
+const schema = z.object({
+  field: z.string().min(1).max(200).trim(),
+});
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  const result = schema.safeParse(body);
+  if (!result.success) {
+    return NextResponse.json({ error: result.error.issues }, { status: 400 });
+  }
+  // Use result.data (validated and typed)
+}
+```
+
+### API Security
+- ALWAYS implement rate limiting on API routes (use Vercel KV, Upstash, or similar)
+- Return generic error messages to clients - never expose stack traces or internal details
+- Validate Content-Type headers for API routes expecting JSON
+- Use `NextResponse` properly with correct status codes
+- Consider implementing API authentication for sensitive endpoints
+
+### Data Handling
+- NEVER log sensitive data (API keys, user credentials, PII)
+- NEVER expose internal error details to the client
+- Use parameterized queries if adding a database
+- Escape user-generated content before rendering
+
+---
+
+## TESTING RULES (MANDATORY)
+
+### Test Requirements
+- EVERY new feature MUST have accompanying tests before being considered complete
+- EVERY bug fix MUST include a regression test
+- API routes MUST have integration tests covering success and error cases
+- Utility functions MUST have unit tests
+
+### Test Structure
+- Place tests next to the code they test: `feature.ts` -> `feature.test.ts`
+- Or use `__tests__` folders at directory level
+- Name test files with `.test.ts` or `.spec.ts` suffix
+
+### Test Coverage Expectations
+- API Routes: Test all HTTP methods, validation errors, success responses, and error handling
+- Components: Test rendering, user interactions, and edge cases
+- Utilities: Test all branches and edge cases
+- Aim for meaningful coverage, not arbitrary percentages
+
+### Testing Setup (if not present, suggest adding)
+```json
+{
+  "devDependencies": {
+    "vitest": "latest",
+    "@testing-library/react": "latest",
+    "@testing-library/user-event": "latest",
+    "jsdom": "latest"
+  }
+}
+```
+
+### Test Example Pattern
+```typescript
+import { describe, it, expect } from 'vitest';
+
+describe('FeatureName', () => {
+  it('should handle valid input correctly', () => {
+    // Arrange, Act, Assert
+  });
+
+  it('should reject invalid input with appropriate error', () => {
+    // Test error cases
+  });
+
+  it('should handle edge cases', () => {
+    // Test boundaries and edge cases
+  });
+});
+```
+
+---
+
+## LOGGING RULES (MANDATORY)
+
+### Structured Logging
+- Use structured logging with consistent format
+- Include context: timestamp, request ID, action, result
+- Log at appropriate levels: error, warn, info, debug
+
+### What to Log
+- API request received (info) - method, path, sanitized params
+- API request completed (info) - status code, duration
+- Errors with stack traces (error) - server-side only
+- External service calls (info) - service name, action, duration
+- Authentication events (info) - success/failure, sanitized user identifier
+- Rate limit hits (warn)
+
+### What NOT to Log
+- API keys or secrets
+- User passwords or tokens
+- Full request/response bodies with sensitive data
+- Personal Identifiable Information (PII)
+
+### Logging Pattern
+```typescript
+// Create a logger utility at lib/logger.ts
+const logger = {
+  info: (message: string, meta?: Record<string, unknown>) => {
+    console.log(JSON.stringify({ level: 'info', message, timestamp: new Date().toISOString(), ...meta }));
+  },
+  warn: (message: string, meta?: Record<string, unknown>) => {
+    console.warn(JSON.stringify({ level: 'warn', message, timestamp: new Date().toISOString(), ...meta }));
+  },
+  error: (message: string, error?: Error, meta?: Record<string, unknown>) => {
+    console.error(JSON.stringify({ 
+      level: 'error', 
+      message, 
+      timestamp: new Date().toISOString(),
+      error: error?.message,
+      stack: process.env.NODE_ENV === 'development' ? error?.stack : undefined,
+      ...meta 
+    }));
+  },
+};
+
+export default logger;
+
+// Usage in API routes
+export async function POST(request: NextRequest) {
+  const requestId = crypto.randomUUID();
+  const startTime = Date.now();
+  
+  logger.info('API request received', { requestId, path: request.url, method: 'POST' });
+  
+  try {
+    // ... handle request
+    logger.info('API request completed', { requestId, duration: Date.now() - startTime, status: 200 });
+    return NextResponse.json({ data });
+  } catch (error) {
+    logger.error('API request failed', error as Error, { requestId, duration: Date.now() - startTime });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+```
+
+---
+
+## VALIDATION RULES
+
+### Install Zod for Validation
+```bash
+npm install zod
+```
+
+### Validation Best Practices
+- Define schemas at the top of files or in dedicated `/lib/schemas` folder
+- Reuse schemas between client and server for consistency
+- Always use `.safeParse()` to handle errors gracefully
+- Provide clear, user-friendly error messages
+
+### Schema Organization
+```
+/lib
+  /schemas
+    user.schema.ts    # User-related schemas
+    api.schema.ts     # API request/response schemas
+    index.ts          # Re-export all schemas
+```
+
+---
+
+## VERCEL & CI/CD RULES
+
+### Pre-Deployment Checklist
+- `npm run build` must pass without errors
+- `npm run lint` must pass without errors
+- All tests must pass
+- No TypeScript errors (`npx tsc --noEmit`)
+- Environment variables documented in README
+
+### Branch Strategy
+- `main` branch = production (auto-deploys to Vercel)
+- NEVER push directly to main without testing
+- Use pull requests for code review
+- Preview deployments are created for PRs automatically
+
+### Vercel-Specific
+- Use Vercel Edge Config for feature flags
+- Use Vercel KV or similar for rate limiting state
+- Configure proper caching headers for static assets
+- Use `export const runtime = 'edge'` carefully (some Node.js APIs unavailable)
+
+### GitHub Actions (Recommended)
+Create `.github/workflows/ci.yml`:
+```yaml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+```
+
+---
+
+## NEXT.JS BEST PRACTICES
+
+### App Router Conventions
+- Use Server Components by default
+- Add `'use client'` directive only when needed (state, effects, browser APIs)
+- Colocate related files: `page.tsx`, `loading.tsx`, `error.tsx`, `layout.tsx`
+- Use `loading.tsx` for Suspense boundaries
+- Use `error.tsx` for error boundaries
+
+### API Routes (Route Handlers)
+- Place in `app/api/` directory
+- Export named functions: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`
+- Always return `NextResponse` objects
+- Handle all error cases explicitly
+- Add proper TypeScript types
+
+### Data Fetching
+- Fetch data in Server Components when possible
+- Use React Server Components for data that doesn't need client interactivity
+- Implement proper loading and error states
+- Cache appropriately using Next.js caching mechanisms
+
+### Performance
+- Use `next/image` for all images
+- Use `next/font` for font optimization
+- Implement proper metadata for SEO
+- Use dynamic imports for code splitting when beneficial
+
+---
+
+## TYPESCRIPT RULES
+
+### Strict Mode
+- TypeScript strict mode must be enabled in `tsconfig.json`
+- No `any` types unless absolutely necessary (document why)
+- Define interfaces/types for all data structures
+- Use generics for reusable components and utilities
+
+### Type Safety
+```typescript
+// Bad
+const data: any = await response.json();
+
+// Good
+interface ApiResponse {
+  items: string[];
+  total: number;
+}
+const data: ApiResponse = await response.json();
+
+// Better - validate at runtime too
+const data = ApiResponseSchema.parse(await response.json());
+```
+
+### Naming Conventions
+- Interfaces: `PascalCase` (e.g., `TaskInput`, `ApiResponse`)
+- Types: `PascalCase` (e.g., `TaskStatus`)
+- Variables/functions: `camelCase`
+- Constants: `UPPER_SNAKE_CASE` for true constants
+- Files: `kebab-case.ts` or `camelCase.ts` (be consistent)
+
+---
+
+## CODE STYLE
+
+### General
+- Use ESLint and Prettier (configure both)
+- Maximum line length: 100 characters
+- Use meaningful variable and function names
+- Add JSDoc comments for public functions and complex logic
+- Keep functions small and focused (single responsibility)
+
+### React Components
+- One component per file (unless tightly coupled)
+- Use functional components with hooks
+- Destructure props with TypeScript interfaces
+- Handle loading and error states explicitly
+
+### File Organization
+```
+/app
+  /api            # API routes
+  /(routes)       # Page routes (can use route groups)
+  layout.tsx      # Root layout
+  page.tsx        # Home page
+/components       # Shared React components
+/lib              # Utility functions, configurations
+  /schemas        # Zod schemas
+  /utils          # Helper functions
+  logger.ts       # Logging utility
+/hooks            # Custom React hooks
+/types            # TypeScript type definitions
+/__tests__        # Test files (or colocate with source)
+```
+
+---
+
+## COMMON PITFALLS TO AVOID
+
+1. **Exposing API keys**: Never use `NEXT_PUBLIC_` for secret keys
+2. **Missing error handling**: Always wrap async operations in try-catch
+3. **Skipping validation**: Validate ALL inputs, even from "trusted" sources
+4. **Console.log in production**: Use proper logging, remove debug logs
+5. **Ignoring TypeScript errors**: Fix them, don't suppress with `// @ts-ignore`
+6. **No loading states**: Always show feedback during async operations
+7. **Hardcoded values**: Use environment variables and configuration
+8. **Missing tests**: No feature is complete without tests
+9. **Direct main branch pushes**: Always use PRs for code review
+10. **Forgetting rate limiting**: Protect APIs from abuse
+
+---
+
+## CHECKLIST FOR EVERY CHANGE
+
+Before considering any task complete, verify:
+
+- [ ] Input validation implemented (server-side)
+- [ ] Error handling with user-friendly messages
+- [ ] No sensitive data in logs or responses
+- [ ] TypeScript types defined (no `any`)
+- [ ] Tests written and passing
+- [ ] Lint passes (`npm run lint`)
+- [ ] Build passes (`npm run build`)
+- [ ] Loading and error states handled in UI
+- [ ] Environment variables documented if new ones added
+
+---
+
+## WHEN IN DOUBT
+
+1. **Security**: If unsure whether something is secure, assume it's not. Research or ask.
+2. **Validation**: Validate more than you think necessary. Users will try unexpected inputs.
+3. **Testing**: If you think "this is too simple to test," test it anyway.
+4. **Logging**: When debugging is needed later, you'll wish you had more logs.
+5. **Error Handling**: Plan for failure. Every external call can fail.
+
+---
+
+*These rules exist to help you build a secure, maintainable, and reliable application. Following them will save debugging time and prevent production incidents.*
