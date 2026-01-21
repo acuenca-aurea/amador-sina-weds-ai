@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@/lib/supabase/server";
-import { createTaskSchema } from "@/lib/schemas";
+import { createTaskSchema, aiTaskResponseSchema } from "@/lib/schemas";
 import logger from "@/lib/logger";
 
 const openai = new OpenAI({
@@ -117,23 +117,37 @@ export async function POST(request: NextRequest) {
 
     const { task } = result.data;
 
-    // Generate subtasks using OpenAI
-    logger.info("Calling OpenAI for subtasks", { requestId });
+    // Generate title and subtasks using OpenAI (combined prompt for efficiency)
+    logger.info("Calling OpenAI for title and subtasks", { requestId });
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: `You are a task breakdown assistant. Given a task, break it down into 3-5 specific, actionable subtasks. 
-Rules:
-- Return ONLY a JSON array of strings
+          content: `You are a task organization assistant. Given a task description, you will:
+1. Generate a short, friendly title (2-5 words) that captures the essence of the task
+2. Break down the task into 3-5 specific, actionable subtasks
+
+Rules for title:
+- Keep it between 2-5 words
+- Use title case (capitalize major words)
+- Make it scannable and memorable
+- Avoid articles (a, an, the) when possible
+- No punctuation at the end
+
+Rules for subtasks:
 - Each subtask should be a clear action item
 - Keep each subtask under 100 characters
 - Return between 3 and 5 subtasks
-- No explanations, just the JSON array
 
-Example input: "Plan a birthday party"
-Example output: ["Send invitations to guests", "Order birthday cake", "Buy decorations", "Plan party games", "Prepare playlist"]`,
+Return a JSON object with this exact structure:
+{
+  "title": "Friendly Title Here",
+  "subtasks": ["Subtask 1", "Subtask 2", "Subtask 3"]
+}
+
+Example input: "Plan my daughter's 5th birthday party for Saturday"
+Example output: {"title": "Birthday Party Planning", "subtasks": ["Send party invitations to friends", "Order birthday cake and decorations", "Plan age-appropriate party games", "Prepare goody bags for guests", "Set up party area"]}`,
         },
         {
           role: "user",
@@ -148,40 +162,68 @@ Example output: ["Send invitations to guests", "Order birthday cake", "Buy decor
     if (!content) {
       logger.error("OpenAI returned empty content", undefined, { requestId });
       return NextResponse.json(
-        { error: "Failed to generate subtasks" },
+        { error: "Failed to generate task breakdown" },
         { status: 500 }
       );
     }
 
+    // Parse and validate AI response with fallback for title
+    let friendlyTitle: string = task; // Fallback to original input
     let subtaskTexts: string[];
+
     try {
-      subtaskTexts = JSON.parse(content);
-      if (!Array.isArray(subtaskTexts) || subtaskTexts.length === 0) {
-        throw new Error("Invalid response format");
+      const parsed = JSON.parse(content);
+      const validated = aiTaskResponseSchema.safeParse(parsed);
+
+      if (validated.success) {
+        friendlyTitle = validated.data.title;
+        subtaskTexts = validated.data.subtasks;
+        logger.info("AI generated friendly title", {
+          requestId,
+          originalTask: task,
+          generatedTitle: friendlyTitle,
+        });
+      } else {
+        // Try to extract subtasks even if title validation fails
+        logger.warn("AI response validation failed, attempting partial parse", {
+          requestId,
+          errors: validated.error.issues,
+        });
+
+        if (Array.isArray(parsed.subtasks) && parsed.subtasks.length > 0) {
+          subtaskTexts = parsed.subtasks.filter(
+            (s: unknown) => typeof s === "string" && (s as string).trim().length > 0
+          );
+          // Use title if present and reasonable, otherwise fallback
+          if (typeof parsed.title === "string" && parsed.title.trim().length >= 2) {
+            friendlyTitle = parsed.title.trim().slice(0, 50);
+          }
+        } else {
+          throw new Error("Could not extract subtasks from response");
+        }
       }
-      subtaskTexts = subtaskTexts.filter(
-        (s) => typeof s === "string" && s.trim().length > 0
-      );
-      if (subtaskTexts.length === 0) {
-        throw new Error("No valid subtasks");
+
+      // Final validation: ensure we have subtasks
+      if (!subtaskTexts || subtaskTexts.length === 0) {
+        throw new Error("No valid subtasks generated");
       }
-    } catch {
-      logger.error("Failed to parse OpenAI response", undefined, {
+    } catch (parseError) {
+      logger.error("Failed to parse OpenAI response", parseError as Error, {
         requestId,
         content,
       });
       return NextResponse.json(
-        { error: "Failed to parse subtasks" },
+        { error: "Failed to parse task breakdown" },
         { status: 500 }
       );
     }
 
-    // Insert task into database
+    // Insert task into database with AI-generated title
     const { data: newTask, error: taskError } = await supabase
       .from("tasks")
       .insert({
         user_id: user.id,
-        title: task,
+        title: friendlyTitle,
       })
       .select("id, title, created_at")
       .single();
